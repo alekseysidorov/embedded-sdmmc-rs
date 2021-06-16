@@ -9,7 +9,7 @@ use super::sdmmc_proto::*;
 use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
 
-const DEFAULT_DELAY_COUNT: u32 = 32_000;
+const DEFAULT_DELAY_COUNT: u32 = 1_024_000;
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some

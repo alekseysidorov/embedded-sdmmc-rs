@@ -10,6 +10,7 @@ use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
 
 const DEFAULT_DELAY_COUNT: u32 = 1_024_000;
+const DEFAULT_ATTEMPTS: u32 = 4096;
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some
@@ -150,7 +151,7 @@ where
             // Assert CS
             s.cs_low()?;
             // Enter SPI mode
-            let mut attempts = 32;
+            let mut attempts = DEFAULT_ATTEMPTS;
             while attempts > 0 {
                 match s.card_command(CMD0, 0) {
                     Err(Error::TimeoutCommand(0)) => {
@@ -392,7 +393,7 @@ where
             let _result = self.receive()?;
         }
 
-        for _ in 0..512 {
+        for _ in 0..DEFAULT_ATTEMPTS {
             let result = self.receive()?;
             if (result & 0x80) == ERROR_OK {
                 return Ok(result);

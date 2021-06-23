@@ -5,24 +5,28 @@
 //! This is currently optimised for readability and debugability, not
 //! performance.
 
+use simple_clock::SimpleClock;
+
 use super::sdmmc_proto::*;
 use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
 
-const DEFAULT_DELAY_COUNT: u32 = 1_024_000;
-const DEFAULT_ATTEMPTS: u32 = 4096;
+const DEFAULT_ATTEMPTS: u32 = 32;
+const DEFAULT_TIMEOUT_US: u64 = 5_000_000; // 5 sec.
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some
 /// bytes without Chip Select asserted (which puts the card into SPI mode).
-pub struct SdMmcSpi<SPI, CS>
+pub struct SdMmcSpi<SPI, CS, CLOCK>
 where
     SPI: embedded_hal::blocking::spi::Transfer<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
+    CLOCK: SimpleClock,
     <SPI as embedded_hal::blocking::spi::Transfer<u8>>::Error: core::fmt::Debug,
 {
     spi: RefCell<SPI>,
     cs: RefCell<CS>,
+    clock: CLOCK,
     card_type: CardType,
     state: State,
 }
@@ -79,42 +83,44 @@ enum CardType {
     SDHC,
 }
 
-/// A terrible hack for busy-waiting the CPU while we wait for the card to
-/// sort itself out.
-///
-/// @TODO replace this!
-struct Delay(u32);
+struct Deadline<'a, C: SimpleClock> {
+    clock: &'a C,
+    started_at: u64,
+    timeout: u64,
+}
 
-impl Delay {
-    fn new() -> Delay {
-        Delay(DEFAULT_DELAY_COUNT)
+impl<'a, C: SimpleClock> Deadline<'a, C> {
+    fn new(clock: &'a C, timeout: u64) -> Self {
+        Self {
+            clock,
+            started_at: clock.now_us(),
+            timeout,
+        }
     }
 
-    fn delay(&mut self, err: Error) -> Result<(), Error> {
-        if self.0 == 0 {
-            Err(err)
+    fn reached(&self) -> Option<()> {
+        let elasped = self.clock.now_us().saturating_sub(self.started_at);
+        if elasped > self.timeout {
+            Some(())
         } else {
-            let dummy_var: u32 = 0;
-            for _ in 0..100 {
-                unsafe { core::ptr::read_volatile(&dummy_var) };
-            }
-            self.0 -= 1;
-            Ok(())
+            None
         }
     }
 }
 
-impl<SPI, CS> SdMmcSpi<SPI, CS>
+impl<SPI, CS, CLOCK> SdMmcSpi<SPI, CS, CLOCK>
 where
     SPI: embedded_hal::blocking::spi::Transfer<u8>,
     CS: embedded_hal::digital::v2::OutputPin,
+    CLOCK: SimpleClock,
     <SPI as embedded_hal::blocking::spi::Transfer<u8>>::Error: core::fmt::Debug,
 {
     /// Create a new SD/MMC controller using a raw SPI interface.
-    pub fn new(spi: SPI, cs: CS) -> SdMmcSpi<SPI, CS> {
+    pub fn new(spi: SPI, cs: CS, clock: CLOCK) -> SdMmcSpi<SPI, CS, CLOCK> {
         SdMmcSpi {
             spi: RefCell::new(spi),
             cs: RefCell::new(cs),
+            clock,
             card_type: CardType::SD1,
             state: State::NoInit,
         }
@@ -177,7 +183,7 @@ where
                 return Err(Error::CantEnableCRC);
             }
             // Check card version
-            let mut delay = Delay::new();
+            let deadline = Deadline::new(&s.clock, DEFAULT_TIMEOUT_US);
             loop {
                 if s.card_command(CMD8, 0x1AA)? == (R1_ILLEGAL_COMMAND | R1_IDLE_STATE) {
                     s.card_type = CardType::SD1;
@@ -191,7 +197,7 @@ where
                     s.card_type = CardType::SD2;
                     break;
                 }
-                delay.delay(Error::TimeoutCommand(CMD8))?;
+                deadline.reached().ok_or(Error::TimeoutCommand(CMD8))?;
             }
 
             let arg = match s.card_type {
@@ -199,9 +205,9 @@ where
                 CardType::SD2 | CardType::SDHC => 0x4000_0000,
             };
 
-            let mut delay = Delay::new();
+            let deadline = Deadline::new(&s.clock, DEFAULT_TIMEOUT_US);
             while s.card_acmd(ACMD41, arg)? != R1_READY_STATE {
-                delay.delay(Error::TimeoutACommand(ACMD41))?;
+                deadline.reached().ok_or(Error::TimeoutACommand(ACMD41))?;
             }
 
             if s.card_type == CardType::SD2 {
@@ -320,13 +326,13 @@ where
     /// given buffer, so make sure it's the right size.
     fn read_data(&self, buffer: &mut [u8]) -> Result<(), Error> {
         // Get first non-FF byte.
-        let mut delay = Delay::new();
+        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
         let status = loop {
             let s = self.receive()?;
             if s != 0xFF {
                 break s;
             }
-            delay.delay(Error::TimeoutReadBuffer)?;
+            deadline.reached().ok_or(Error::TimeoutReadBuffer)?;
         };
         if status != DATA_START_BLOCK {
             return Err(Error::ReadError);
@@ -393,14 +399,15 @@ where
             let _result = self.receive()?;
         }
 
-        for _ in 0..DEFAULT_ATTEMPTS {
+        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
+        loop {
             let result = self.receive()?;
             if (result & 0x80) == ERROR_OK {
                 return Ok(result);
             }
-        }
 
-        Err(Error::TimeoutCommand(command))
+            deadline.reached().ok_or(Error::TimeoutCommand(command))?;
+        }
     }
 
     /// Receive a byte from the SD card by clocking in an 0xFF byte.
@@ -425,23 +432,24 @@ where
     /// Spin until the card returns 0xFF, or we spin too many times and
     /// timeout.
     fn wait_not_busy(&self) -> Result<(), Error> {
-        let mut delay = Delay::new();
+        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
         loop {
             let s = self.receive()?;
             if s == 0xFF {
                 break;
             }
-            delay.delay(Error::TimeoutWaitNotBusy)?;
+            deadline.reached().ok_or(Error::TimeoutWaitNotBusy)?;
         }
         Ok(())
     }
 }
 
-impl<SPI, CS> BlockDevice for SdMmcSpi<SPI, CS>
+impl<SPI, CS, CLOCK> BlockDevice for SdMmcSpi<SPI, CS, CLOCK>
 where
     SPI: embedded_hal::blocking::spi::Transfer<u8>,
     <SPI as embedded_hal::blocking::spi::Transfer<u8>>::Error: core::fmt::Debug,
     CS: embedded_hal::digital::v2::OutputPin,
+    CLOCK: SimpleClock,
 {
     type Error = Error;
 

@@ -43,7 +43,7 @@ pub enum Error {
     /// We didn't get a response when waiting for the card to not be busy
     TimeoutWaitNotBusy,
     /// We didn't get a response when executing this command
-    TimeoutCommand(u8),
+    TimeoutCommand(u8, u8),
     /// We didn't get a response when executing this application-specific command
     TimeoutACommand(u8),
     /// We got a bad response from Command 58
@@ -159,7 +159,7 @@ where
             let mut attempts = DEFAULT_ATTEMPTS;
             while attempts > 0 {
                 match s.card_command(CMD0, 0) {
-                    Err(Error::TimeoutCommand(0)) => {
+                    Err(Error::TimeoutCommand(0, _)) => {
                         // Try again?
                         attempts -= 1;
                     }
@@ -198,7 +198,7 @@ where
                 }
                 deadline
                     .reached()
-                    .map_err(|_| Error::TimeoutCommand(CMD8))?;
+                    .map_err(|_| Error::TimeoutCommand(CMD8, status))?;
             }
 
             let arg = match s.card_type {
@@ -411,7 +411,7 @@ where
 
             deadline
                 .reached()
-                .map_err(|_| Error::TimeoutCommand(command))?;
+                .map_err(|_| Error::TimeoutCommand(command, result))?;
         }
     }
 

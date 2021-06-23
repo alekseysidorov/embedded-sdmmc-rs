@@ -12,7 +12,6 @@ use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
 
 const DEFAULT_ATTEMPTS: u32 = 32;
-const DEFAULT_TIMEOUT_US: u64 = 500_000; // 0.5 sec.
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some
@@ -29,6 +28,7 @@ where
     clock: CLOCK,
     card_type: CardType,
     state: State,
+    timeout_us: u64,
 }
 
 /// The possible errors `SdMmcSpi` can generate.
@@ -114,13 +114,14 @@ where
     <SPI as embedded_hal::blocking::spi::Transfer<u8>>::Error: core::fmt::Debug,
 {
     /// Create a new SD/MMC controller using a raw SPI interface.
-    pub fn new(spi: SPI, cs: CS, clock: CLOCK) -> SdMmcSpi<SPI, CS, CLOCK> {
+    pub fn new(spi: SPI, cs: CS, clock: CLOCK, timeout_us: u64) -> SdMmcSpi<SPI, CS, CLOCK> {
         SdMmcSpi {
             spi: RefCell::new(spi),
             cs: RefCell::new(cs),
             clock,
             card_type: CardType::SD1,
             state: State::NoInit,
+            timeout_us,
         }
     }
 
@@ -181,7 +182,7 @@ where
                 return Err(Error::CantEnableCRC);
             }
             // Check card version
-            let deadline = Deadline::new(&s.clock, DEFAULT_TIMEOUT_US);
+            let deadline = Deadline::new(&s.clock, s.timeout_us);
             loop {
                 if s.card_command(CMD8, 0x1AA)? == (R1_ILLEGAL_COMMAND | R1_IDLE_STATE) {
                     s.card_type = CardType::SD1;
@@ -205,7 +206,7 @@ where
                 CardType::SD2 | CardType::SDHC => 0x4000_0000,
             };
 
-            let deadline = Deadline::new(&s.clock, DEFAULT_TIMEOUT_US);
+            let deadline = Deadline::new(&s.clock, s.timeout_us);
             while s.card_acmd(ACMD41, arg)? != R1_READY_STATE {
                 deadline
                     .reached()
@@ -328,7 +329,7 @@ where
     /// given buffer, so make sure it's the right size.
     fn read_data(&self, buffer: &mut [u8]) -> Result<(), Error> {
         // Get first non-FF byte.
-        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
+        let deadline = Deadline::new(&self.clock, self.timeout_us);
         let status = loop {
             let s = self.receive()?;
             if s != 0xFF {
@@ -401,7 +402,7 @@ where
             let _result = self.receive()?;
         }
 
-        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
+        let deadline = Deadline::new(&self.clock, self.timeout_us);
         loop {
             let result = self.receive()?;
             if (result & 0x80) == ERROR_OK {
@@ -436,7 +437,7 @@ where
     /// Spin until the card returns 0xFF, or we spin too many times and
     /// timeout.
     fn wait_not_busy(&self) -> Result<(), Error> {
-        let deadline = Deadline::new(&self.clock, DEFAULT_TIMEOUT_US);
+        let deadline = Deadline::new(&self.clock, self.timeout_us);
         loop {
             let s = self.receive()?;
             if s == 0xFF {

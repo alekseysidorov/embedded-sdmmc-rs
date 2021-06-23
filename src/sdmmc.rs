@@ -10,10 +10,9 @@ use simple_clock::SimpleClock;
 use super::sdmmc_proto::*;
 use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
-use core::time;
 
 const DEFAULT_ATTEMPTS: u32 = 32;
-const DEFAULT_TIMEOUT_US: u64 = 32_000_000; // 32 sec.
+const DEFAULT_TIMEOUT_US: u64 = 500_000; // 0.5 sec.
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some
@@ -98,11 +97,11 @@ impl<'a, C: SimpleClock> Deadline<'a, C> {
         }
     }
 
-    fn reached(&self) -> Option<()> {
+    fn reached(&self) -> Result<(), ()> {
         if self.clock.now_us() > self.deadline {
-            Some(())
+            Err(())
         } else {
-            None
+            Ok(())
         }
     }
 }
@@ -196,7 +195,9 @@ where
                     s.card_type = CardType::SD2;
                     break;
                 }
-                deadline.reached().ok_or(Error::TimeoutCommand(CMD8))?;
+                deadline
+                    .reached()
+                    .map_err(|_| Error::TimeoutCommand(CMD8))?;
             }
 
             let arg = match s.card_type {
@@ -206,7 +207,9 @@ where
 
             let deadline = Deadline::new(&s.clock, DEFAULT_TIMEOUT_US);
             while s.card_acmd(ACMD41, arg)? != R1_READY_STATE {
-                deadline.reached().ok_or(Error::TimeoutACommand(ACMD41))?;
+                deadline
+                    .reached()
+                    .map_err(|_| Error::TimeoutACommand(ACMD41))?;
             }
 
             if s.card_type == CardType::SD2 {
@@ -331,7 +334,7 @@ where
             if s != 0xFF {
                 break s;
             }
-            deadline.reached().ok_or(Error::TimeoutReadBuffer)?;
+            deadline.reached().map_err(|_| Error::TimeoutReadBuffer)?;
         };
         if status != DATA_START_BLOCK {
             return Err(Error::ReadError);
@@ -405,7 +408,9 @@ where
                 return Ok(result);
             }
 
-            deadline.reached().ok_or(Error::TimeoutCommand(command))?;
+            deadline
+                .reached()
+                .map_err(|_| Error::TimeoutCommand(command))?;
         }
     }
 
@@ -437,7 +442,7 @@ where
             if s == 0xFF {
                 break;
             }
-            deadline.reached().ok_or(Error::TimeoutWaitNotBusy)?;
+            deadline.reached().map_err(|_| Error::TimeoutWaitNotBusy)?;
         }
         Ok(())
     }

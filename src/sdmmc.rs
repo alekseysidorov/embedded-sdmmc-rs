@@ -10,9 +10,10 @@ use simple_clock::SimpleClock;
 use super::sdmmc_proto::*;
 use super::{Block, BlockCount, BlockDevice, BlockIdx};
 use core::cell::RefCell;
+use core::time;
 
 const DEFAULT_ATTEMPTS: u32 = 32;
-const DEFAULT_TIMEOUT_US: u64 = 5_000_000; // 5 sec.
+const DEFAULT_TIMEOUT_US: u64 = 32_000_000; // 32 sec.
 
 /// Represents an SD Card interface built from an SPI peripheral and a Chip
 /// Select pin. We need Chip Select to be separate so we can clock out some
@@ -83,24 +84,22 @@ enum CardType {
     SDHC,
 }
 
+#[derive(Debug)]
 struct Deadline<'a, C: SimpleClock> {
     clock: &'a C,
-    started_at: u64,
-    timeout: u64,
+    deadline: u64,
 }
 
 impl<'a, C: SimpleClock> Deadline<'a, C> {
     fn new(clock: &'a C, timeout: u64) -> Self {
         Self {
             clock,
-            started_at: clock.now_us(),
-            timeout,
+            deadline: clock.now_us() + timeout,
         }
     }
 
     fn reached(&self) -> Option<()> {
-        let elasped = self.clock.now_us().saturating_sub(self.started_at);
-        if elasped > self.timeout {
+        if self.clock.now_us() > self.deadline {
             Some(())
         } else {
             None
